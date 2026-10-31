@@ -15,10 +15,6 @@ DB_USER = os.getenv("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "procurement_agent")
 
-# ---- 后端服务 ----
-BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1")
-BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
-
 # ---- RAGFlow ----
 RAGFLOW_BASE_URL = os.getenv("RAGFLOW_BASE_URL", "").rstrip("/")
 RAGFLOW_API_KEY = os.getenv("RAGFLOW_API_KEY", "")
@@ -30,7 +26,7 @@ DIFY_APP_API_KEY = os.getenv("DIFY_APP_API_KEY", "")
 
 # ---- MCP ----
 MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio")
-MCP_HOST = os.getenv("MCP_HOST", "127.0.10.1")
+MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8911"))
 
 # ---- 核对引擎默认规则 ----

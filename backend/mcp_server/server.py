@@ -1,4 +1,5 @@
-"""MCP Server（采购履约异常审查）：把采购业务能力封装为 Agent 可调用的工具。
+"""MCP Server（采购履约异常审查）：把后端实现的采购业务能力，注册成  MCP 工具，
+    并封装为  Dify Agent 可以通过 MCP 协议调用的工具。
 
 工具清单：
   - get_purchase_case(po_id)           采购单摘要、明细、收货、发票与异常数量
@@ -25,9 +26,14 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend import config
+from backend.models.db import init_database
 from backend.models.schemas import ExceptionCase
 from backend.services import exception_service, order_service
 
+
+# ──────────────────────────────────────────────
+# 创建  MCP Server
+# ──────────────────────────────────────────────
 mcp = FastMCP(
     name="procurement-review-agent",
     instructions=(
@@ -38,26 +44,24 @@ mcp = FastMCP(
     host=config.MCP_HOST,
     port=config.MCP_PORT,
     streamable_http_path="/mcp",
-    sse_path="/sse",
+
+    # 传输安全配置
     transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=False,
-        allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
-        allowed_origins=[
-            "http://localhost",
-            "http://localhost:*",
-            "http://127.0.0.1",
-            "http://127.0.0.1:*",
-            "http://[::1]",
-            "http://[::1]:*",
-        ],
-    ),
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["host.docker.internal:8911"]
+    )
 )
 
 
+# 异常对象类型转换
 def _exc_to_dict(exc: ExceptionCase) -> dict:
     return exc.model_dump(mode="json")
 
 
+# ──────────────────────────────────────────────
+# 五个工具
+# ──────────────────────────────────────────────
+# 1. 采购单、异常查询
 @mcp.tool()
 def get_purchase_case(po_id: int) -> dict:
     """获取采购单摘要、商品明细、收货明细、发票明细与异常状态汇总。"""
@@ -103,6 +107,7 @@ def get_purchase_case(po_id: int) -> dict:
     }
 
 
+# 2. 执行确定性核对
 @mcp.tool()
 def run_match_check(po_id: int) -> dict:
     """对指定采购单执行确定性核对（数量/单价/重复/缺失），返回全部异常及证据。"""
@@ -119,6 +124,7 @@ def run_match_check(po_id: int) -> dict:
     }
 
 
+# 3. 异常详情查询
 @mcp.tool()
 def get_exception_detail(exception_id: int) -> dict:
     """获取单项异常详情：类型、严重程度、参考值/实际值/差值、证据、处理状态。"""
@@ -128,12 +134,14 @@ def get_exception_detail(exception_id: int) -> dict:
     return _exc_to_dict(exc)
 
 
+# 4. 异常列表查询
 @mcp.tool()
 def list_open_exceptions() -> list[dict]:
     """列出所有待处理（open / under_review）的异常，便于了解当前积压。"""
     return [_exc_to_dict(e) for e in exception_service.list_open_exceptions()]
 
 
+# 5. 合同条款检索
 @mcp.tool()
 def search_contract_rules(exception_type: str) -> dict:
     """检索与该异常类型相关的合同/政策条款原文（来自 RAGFlow 知识库）。"""
@@ -192,6 +200,7 @@ def main():
         help="stdio（本地调试）或 streamable-http（供 Dify 连接）",
     )
     args = parser.parse_args()
+    init_database()
     if args.transport == "stdio":
         mcp.run()
     else:
