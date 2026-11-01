@@ -75,34 +75,3 @@ MCP Server（5 个工具：业务查询 / 核对 / 知识检索）
 ├── requirements.txt
 └── .env.example
 ```
-
-## 快速开始
-
-环境：Python 3.11+、本机 MySQL 8。
-
-```bash
-# 1. 安装依赖
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-
-# 2. 配置 .env（从 .env.example 复制，填数据库账号、RAGFlow/Dify Key）
-
-# 3. 建库建表并生成模拟数据
-.venv\Scripts\python.exe -m database.seed_data
-
-# 4. 启动 MCP Server
-#    streamable-http（供 Dify 连接）
-.venv\Scripts\python.exe -m backend.mcp_server.server --transport streamable-http
-#    stdio（本地调试）
-.venv\Scripts\python.exe -m backend.mcp_server.server --transport stdio
-
-# 5. 测试与冒烟
-.venv\Scripts\python.exe -m pytest tests -q
-.venv\Scripts\python.exe scripts\test_mcp.py
-```
-
-## 已知限制
-
-- 测试集为 30 组模拟数据，不能据此宣称适用于所有真实企业。
-- 不包含单据 OCR / 解析；扫描件与 PDF 识别列为可选增强。
-- RAGFlow / Dify 联调需自行配置 Key 与知识库。
