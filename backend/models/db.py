@@ -1,11 +1,13 @@
 """MySQL 连接工具：基于 pymysql，每次操作获取短连接。"""
+from contextlib import contextmanager
+
 import pymysql
 
 from backend import config
 
 
-def get_connection():
-    """获取一个 MySQL 连接（自动提交关闭，由调用方管理事务）。"""
+def get_connection(autocommit: bool = True):
+    """获取一个 MySQL 连接。默认自动提交；autocommit=False 时由调用方管理事务。"""
     return pymysql.connect(
         host=config.DB_HOST,
         port=config.DB_PORT,
@@ -14,8 +16,26 @@ def get_connection():
         database=config.DB_NAME,
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
+        autocommit=autocommit,
     )
+
+
+@contextmanager
+def transaction():
+    """提供一个未自动提交的连接：正常退出提交，异常回滚。
+
+    用于把「删除旧数据 + 写入新数据」等多步写入包成原子操作，
+    避免部分成功导致的中间态。
+    """
+    conn = get_connection(autocommit=False)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_database():

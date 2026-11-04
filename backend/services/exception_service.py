@@ -43,6 +43,7 @@ def _row_to_exception(row: dict) -> ExceptionCase:
         id=row["id"],
         exception_code=row["exception_code"],
         po_id=row["po_id"],
+        check_run_id=row.get("check_run_id"),
         po_number=row.get("po_number"),
         supplier_name=row.get("supplier_name"),
         po_item_id=row.get("po_item_id"),
@@ -65,43 +66,56 @@ def _dec_or_none(v):
     return float(v) if v is not None else None
 
 
-def save_exceptions(po_id: int, exceptions: list[ExceptionCase]) -> list[ExceptionCase]:
-    """批量写入异常，生成 exception_code，返回带 id 的完整对象。"""
+def save_exceptions(
+    po_id: int,
+    exceptions: list[ExceptionCase],
+    check_run_id: int,
+    conn,
+) -> list[ExceptionCase]:
+    """保存核对产生的异常，并关联所属核对批次。
+
+    使用调用方传入的连接，不自行提交或关闭，由调用方统一控制事务。
+    """
     if not exceptions:
         return []
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            for exc in exceptions:
-                exc.po_id = po_id
-                cur.execute(
-                    """INSERT INTO exception_cases
-                       (exception_code, po_id, po_item_id, exception_type, severity,
-                        status, title, description, expected_value, actual_value,
-                        difference_value, evidence_json)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        "TMP", po_id, exc.po_item_id, exc.exception_type, exc.severity,
-                        exc.status, exc.title, exc.description,
-                        exc.expected_value, exc.actual_value, exc.difference_value,
-                        _dump(exc.evidence_json),
-                    ),
-                )
-                exc.id = cur.lastrowid
-                exc.exception_code = f"EX-{exc.id:05d}"
-                cur.execute(
-                    "UPDATE exception_cases SET exception_code = %s WHERE id = %s",
-                    (exc.exception_code, exc.id),
-                )
+    with conn.cursor() as cur:
+        for exc in exceptions:
+            exc.po_id = po_id
+            cur.execute(
+                """INSERT INTO exception_cases
+                   (exception_code, po_id, check_run_id, po_item_id, exception_type,
+                    severity, status, title, description, expected_value, actual_value,
+                    difference_value, evidence_json)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    "TMP", po_id, check_run_id, exc.po_item_id, exc.exception_type, exc.severity,
+                    exc.status, exc.title, exc.description,
+                    exc.expected_value, exc.actual_value, exc.difference_value,
+                    _dump(exc.evidence_json),
+                ),
+            )
+            exc.id = cur.lastrowid
+            exc.exception_code = f"EX-{exc.id:05d}"
+            cur.execute(
+                "UPDATE exception_cases SET exception_code = %s WHERE id = %s",
+                (exc.exception_code, exc.id),
+            )
     return exceptions
 
 
 def list_exceptions(po_id: int, status: Optional[str] = None) -> list[ExceptionCase]:
+    """查询指定采购单最新成功核对批次下的异常。"""
     with get_connection() as conn:
         with conn.cursor() as cur:
+            sql = _EXC_SELECT + (
+                "WHERE e.po_id = %s AND e.check_run_id = p.latest_check_run_id"
+            )
+            args: list = [po_id]
             if status:
-                cur.execute(_EXC_SELECT + "WHERE e.po_id = %s AND e.status = %s ORDER BY e.id", (po_id, status))
-            else:
-                cur.execute(_EXC_SELECT + "WHERE e.po_id = %s ORDER BY e.id", (po_id,))
+                sql += " AND e.status = %s"
+                args.append(status)
+            sql += " ORDER BY e.id"
+            cur.execute(sql, args)
             return [_row_to_exception(r) for r in cur.fetchall()]
 
 
@@ -114,18 +128,26 @@ def get_exception(exception_id: int) -> Optional[ExceptionCase]:
 
 
 def list_open_exceptions() -> list[ExceptionCase]:
-    """查询所有未处理完的异常（open / under_review）。"""
+    """查询所有采购单最新成功核对批次中的未处理异常（open / under_review）。"""
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(_EXC_SELECT + "WHERE e.status IN ('open','under_review') ORDER BY e.po_id, e.id")
+            cur.execute(
+                _EXC_SELECT
+                + "WHERE e.check_run_id = p.latest_check_run_id "
+                "AND e.status IN ('open','under_review') ORDER BY e.po_id, e.id"
+            )
             return [_row_to_exception(r) for r in cur.fetchall()]
 
 
 def count_by_status(po_id: int) -> dict[str, int]:
+    """按状态统计指定采购单最新核对批次下的异常数量。"""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT status, COUNT(*) AS cnt FROM exception_cases WHERE po_id = %s GROUP BY status",
+                "SELECT e.status, COUNT(*) AS cnt FROM exception_cases e "
+                "JOIN purchase_orders p ON p.id = e.po_id "
+                "WHERE e.po_id = %s AND e.check_run_id = p.latest_check_run_id "
+                "GROUP BY e.status",
                 (po_id,),
             )
             return {r["status"]: r["cnt"] for r in cur.fetchall()}

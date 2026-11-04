@@ -11,10 +11,6 @@
 设计约束：
   - 只提供"查询与解释"工具，不暴露任意 SQL / 直接改库
   - 异常状态修改走后端 API（人工确认），Agent 不直接改状态
-
-启动方式：
-  python -m backend.mcp_server.server --transport stdio          # 本地调试
-  python -m backend.mcp_server.server --transport streamable-http # 供 Dify 连接
 """
 from __future__ import annotations
 

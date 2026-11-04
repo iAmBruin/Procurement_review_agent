@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from backend.models.db import get_connection
+from backend.models.db import get_connection, transaction
 from backend.models.schemas import (
     CheckResult,
     ExceptionCase,
@@ -58,6 +58,7 @@ def _row_to_po(row: dict) -> PurchaseOrder:
         currency=row.get("currency") or "CNY",
         status=row.get("status") or "open",
         remarks=row.get("remarks"),
+        latest_check_run_id=row.get("latest_check_run_id"),
         created_at=row.get("created_at"),
     )
 
@@ -76,8 +77,10 @@ def list_purchase_orders(status: Optional[str] = None, keyword: Optional[str] = 
     sql = f"""
         SELECT p.*,
                (SELECT COUNT(*) FROM purchase_order_items i WHERE i.po_id = p.id) AS item_count,
-               (SELECT COUNT(*) FROM exception_cases e WHERE e.po_id = p.id) AS exception_count,
                (SELECT COUNT(*) FROM exception_cases e WHERE e.po_id = p.id
+                 AND e.check_run_id = p.latest_check_run_id) AS exception_count,
+               (SELECT COUNT(*) FROM exception_cases e WHERE e.po_id = p.id
+                 AND e.check_run_id = p.latest_check_run_id
                  AND e.status IN ('open','under_review')) AS open_exception_count
         FROM purchase_orders p
         {clause}
@@ -105,16 +108,20 @@ def get_purchase_order(po_id: int) -> Optional[PurchaseOrder]:
             row = cur.fetchone()
             if not row:
                 return None
+            # 将数据库行转换为 PurchaseOrder 对象
             po = _row_to_po(row)
+            latest_run_id = row.get("latest_check_run_id")
             cur.execute("SELECT COUNT(*) AS c FROM purchase_order_items WHERE po_id = %s", (po_id,))
             po.item_count = cur.fetchone()["c"]
             cur.execute(
-                "SELECT COUNT(*) AS c FROM exception_cases WHERE po_id = %s", (po_id,)
+                "SELECT COUNT(*) AS c FROM exception_cases WHERE po_id = %s AND check_run_id <=> %s",
+                (po_id, latest_run_id),
             )
             po.exception_count = cur.fetchone()["c"]
             cur.execute(
-                "SELECT COUNT(*) AS c FROM exception_cases WHERE po_id = %s AND status IN ('open','under_review')",
-                (po_id,),
+                "SELECT COUNT(*) AS c FROM exception_cases WHERE po_id = %s "
+                "AND check_run_id <=> %s AND status IN ('open','under_review')",
+                (po_id, latest_run_id),
             )
             po.open_exception_count = cur.fetchone()["c"]
             return po
@@ -162,28 +169,68 @@ def create_purchase_order(po: PurchaseOrderCreate, items: list[PurchaseOrderItem
 
 # ---------------------------------------------------------------- 核对
 def run_check(po_id: int) -> CheckResult:
-    """对单张采购单执行核对，异常写入 exception_cases 并返回完整结果。
+    """对指定采购单执行核对，每次生成一个新的核对批次。
 
-    幂等：核对前先清除该采购单已有异常及其审核日志，避免重复累积。
+    保留历史异常与人工审核记录，仅前移采购单的「最新成功核对批次」指针；
+    旧批次数据不做物理删除，便于审计追溯。
     """
     po = get_purchase_order(po_id)
     if not po:
         raise ValueError(f"采购单不存在：id={po_id}")
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM review_logs WHERE exception_id IN "
-                "(SELECT id FROM exception_cases WHERE po_id = %s)", (po_id,)
-            )
-            cur.execute("DELETE FROM exception_cases WHERE po_id = %s", (po_id,))
-    exceptions = reconciliation_engine.check_po(po_id)
-    saved = exception_service.save_exceptions(po_id, exceptions)
+
+    # 1. 创建核对批次（初始 running）
+    check_run_id = _create_check_run(po_id)
+    try:
+        # 2. 确定性核对（只读，可在写事务之外完成）
+        detected = reconciliation_engine.check_po(po_id)
+
+        # 3. 事务内：保存异常 + 前移最新批次指针 + 标记批次完成
+        with transaction() as conn:
+            exception_service.save_exceptions(po_id, detected, check_run_id, conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE purchase_orders SET latest_check_run_id = %s WHERE id = %s",
+                    (check_run_id, po_id),
+                )
+                cur.execute(
+                    "UPDATE check_runs SET status = 'completed', finished_at = NOW() WHERE id = %s",
+                    (check_run_id,),
+                )
+    except Exception as e:
+        _mark_check_run_failed(check_run_id, str(e))
+        raise
+
+    # 4. 返回最新批次下的全量异常
+    exceptions = exception_service.list_exceptions(po_id)
+
     return CheckResult(
         po_id=po_id,
         po_number=po.po_number,
         checked_at=datetime.now(),
-        exceptions=saved,
+        exceptions=exceptions,
     )
+
+
+def _create_check_run(po_id: int) -> int:
+    """创建一次核对批次（初始状态 running），返回批次 id。"""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO check_runs (po_id, status) VALUES (%s, 'running')",
+                (po_id,),
+            )
+            return cur.lastrowid
+
+
+def _mark_check_run_failed(check_run_id: int, error_message: str) -> None:
+    """将核对批次标记为 failed，并记录失败原因。"""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE check_runs SET status = 'failed', error_message = %s, finished_at = NOW() "
+                "WHERE id = %s",
+                (error_message[:5000], check_run_id),
+            )
 
 
 def get_order_details(po_id: int) -> dict:
@@ -222,21 +269,34 @@ def get_order_details(po_id: int) -> dict:
 
 
 def stats() -> dict:
-    """仪表盘统计。"""
+    """仪表盘统计（仅统计各采购单最新成功核对批次的异常）。"""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) AS c FROM purchase_orders")
             total_po = cur.fetchone()["c"]
-            cur.execute("SELECT COUNT(*) AS c FROM exception_cases")
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM exception_cases e "
+                "JOIN purchase_orders p ON p.id = e.po_id "
+                "WHERE e.check_run_id = p.latest_check_run_id"
+            )
             total_exc = cur.fetchone()["c"]
-            cur.execute("SELECT COUNT(*) AS c FROM exception_cases WHERE status IN ('open','under_review')")
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM exception_cases e "
+                "JOIN purchase_orders p ON p.id = e.po_id "
+                "WHERE e.check_run_id = p.latest_check_run_id "
+                "AND e.status IN ('open','under_review')"
+            )
             open_exc = cur.fetchone()["c"]
             cur.execute(
-                "SELECT exception_type, COUNT(*) AS c FROM exception_cases GROUP BY exception_type"
+                "SELECT e.exception_type, COUNT(*) AS c FROM exception_cases e "
+                "JOIN purchase_orders p ON p.id = e.po_id "
+                "WHERE e.check_run_id = p.latest_check_run_id GROUP BY e.exception_type"
             )
             by_type = {r["exception_type"]: r["c"] for r in cur.fetchall()}
             cur.execute(
-                "SELECT severity, COUNT(*) AS c FROM exception_cases GROUP BY severity"
+                "SELECT e.severity, COUNT(*) AS c FROM exception_cases e "
+                "JOIN purchase_orders p ON p.id = e.po_id "
+                "WHERE e.check_run_id = p.latest_check_run_id GROUP BY e.severity"
             )
             by_severity = {r["severity"]: r["c"] for r in cur.fetchall()}
     return {

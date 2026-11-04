@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
     status ENUM('draft','open','partially_received','received','closed','cancelled')
         NOT NULL DEFAULT 'open' COMMENT '采购单状态',
     remarks VARCHAR(500) NULL COMMENT '备注',
+    latest_check_run_id BIGINT UNSIGNED NULL COMMENT '最新成功核对批次，关联 check_runs.id',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -90,11 +91,27 @@ CREATE TABLE IF NOT EXISTS invoice_items (
     CONSTRAINT chk_invoice_unit_price CHECK (unit_price >= 0)
 ) ENGINE=InnoDB COMMENT='发票明细';
 
--- 5. 异常记录：由 Python 检查逻辑生成，人工审核后更新状态
+-- 5. 核对批次：每次执行核对生成一条记录，用于追溯异常产生于哪次核对
+CREATE TABLE IF NOT EXISTS check_runs (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    po_id BIGINT UNSIGNED NOT NULL COMMENT '关联 purchase_orders.id',
+    status ENUM('running','completed','failed') NOT NULL DEFAULT 'running' COMMENT '批次状态',
+    error_message TEXT NULL COMMENT '失败原因',
+    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME NULL,
+    PRIMARY KEY (id),
+    KEY idx_check_runs_po (po_id),
+    CONSTRAINT fk_check_runs_po
+        FOREIGN KEY (po_id) REFERENCES purchase_orders(id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB COMMENT='核对批次记录';
+
+-- 6. 异常记录：由 Python 检查逻辑生成，人工审核后更新状态
 CREATE TABLE IF NOT EXISTS exception_cases (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     exception_code VARCHAR(50) NOT NULL COMMENT '异常编号，如 EX-0001',
     po_id BIGINT UNSIGNED NOT NULL COMMENT '关联采购单',
+    check_run_id BIGINT UNSIGNED NULL COMMENT '所属核对批次，关联 check_runs.id',
     po_item_id BIGINT UNSIGNED NULL COMMENT '关联采购商品明细；订单级异常可为空',
     exception_type VARCHAR(80) NOT NULL COMMENT '如 QTY_EXCEEDED、UNIT_PRICE_MISMATCH',
     severity ENUM('low','medium','high','critical')
@@ -118,15 +135,19 @@ CREATE TABLE IF NOT EXISTS exception_cases (
     KEY idx_exception_status (status),
     KEY idx_exception_type (exception_type),
     KEY idx_exception_detected_at (detected_at),
+    KEY idx_exception_check_run (check_run_id),
     CONSTRAINT fk_exception_po
         FOREIGN KEY (po_id) REFERENCES purchase_orders(id)
         ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_exception_po_item
         FOREIGN KEY (po_item_id) REFERENCES purchase_order_items(id)
-        ON UPDATE CASCADE ON DELETE RESTRICT
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_exception_check_run
+        FOREIGN KEY (check_run_id) REFERENCES check_runs(id)
+        ON UPDATE CASCADE ON DELETE SET NULL
 ) ENGINE=InnoDB COMMENT='采购异常记录';
 
--- 6. 人工审核记录：保留每一次审核动作，形成审计轨迹
+-- 7. 人工审核记录：保留每一次审核动作，形成审计轨迹
 CREATE TABLE IF NOT EXISTS review_logs (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     exception_id BIGINT UNSIGNED NOT NULL COMMENT '关联 exception_cases.id',

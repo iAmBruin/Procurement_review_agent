@@ -61,6 +61,7 @@ class PurchaseOrder(BaseModel):
     currency: str = "CNY"
     status: PoStatus = "open"
     remarks: Optional[str] = None
+    latest_check_run_id: Optional[int] = None
     created_at: Optional[datetime] = None
     # 汇总字段（查询时计算填充）
     item_count: int = 0
@@ -89,6 +90,7 @@ class ExceptionCase(BaseModel):
     id: Optional[int] = None
     exception_code: str = ""  # 保存后由 exception_service 填充（EX-00001 形式）
     po_id: int
+    check_run_id: Optional[int] = None   # 所属核对批次
     po_number: Optional[str] = None       # 由 JOIN 补全
     supplier_name: Optional[str] = None   # 由 JOIN 补全
     po_item_id: Optional[int] = None

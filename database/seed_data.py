@@ -17,7 +17,7 @@ import random
 from datetime import date, timedelta
 
 from backend.models.db import get_connection
-from backend.services import exception_service, reconciliation_engine
+from backend.services import order_service
 
 SUPPLIERS = [
     ("SUP-001", "上海钢联物资有限公司"),
@@ -46,6 +46,7 @@ PRODUCTS = [
 _DELETE_ORDER = [
     "review_logs",
     "exception_cases",
+    "check_runs",
     "receipt_items",
     "invoice_items",
     "purchase_order_items",
@@ -150,12 +151,11 @@ def seed() -> dict:
                         (inv_no, item_id, order_date + timedelta(days=5), invoiced_qty, invoice_price),
                     )
 
-    # 运行核对引擎，产出异常
+    # 运行核对引擎，产出异常（每次核对生成一个批次）
     total_exc = 0
     for po_id in po_ids:
-        excs = reconciliation_engine.check_po(po_id)
-        exception_service.save_exceptions(po_id, excs)
-        total_exc += len(excs)
+        result = order_service.run_check(po_id)
+        total_exc += len(result.exceptions)
 
     return {"purchase_orders": len(po_ids), "exceptions": total_exc}
 
